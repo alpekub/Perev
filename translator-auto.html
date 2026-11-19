@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Авто-переводчик RU ⇄ KM</title>
+<style>
+:root{--bg:#f4f2ec;--card:#fff;--ink:#1c1c1e;--mut:#7a7a80;--ru:#2f5bea;--km:#e0572f;--en:#8a5cf6}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font-family:-apple-system,system-ui,Segoe UI,Roboto,sans-serif;font-size:16px;display:flex;flex-direction:column}
+.top{padding:8px 12px;background:var(--bg);border-bottom:1px solid #ddd}
+.top h1{font-size:16px;margin:0 0 6px}
+.opts{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:13px}
+.opts label{background:var(--card);border-radius:10px;padding:6px 9px;display:flex;gap:6px;align-items:center}
+.opts select{border:0;background:transparent;font-size:13px}
+#log{flex:1;overflow:auto;padding:12px}
+.b{max-width:88%;margin:0 0 12px;padding:10px 12px;border-radius:16px;background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.b.ru{border-left:6px solid var(--ru);margin-right:auto}
+.b.km{border-left:6px solid var(--km);margin-left:auto;text-align:left}
+.b .src{font-size:15px;color:var(--mut)}
+.b .en{font-size:15px;color:var(--en);margin:4px 0}
+.b .dst{font-size:21px;line-height:1.4;font-weight:600}
+.b .lab{font-size:11px;color:var(--mut);text-transform:uppercase;margin-bottom:2px}
+.empty{color:var(--mut);text-align:center;margin-top:40px;font-size:15px;padding:0 20px}
+.bottom{padding:10px 12px 16px;background:var(--bg);border-top:1px solid #ddd}
+#stat{text-align:center;font-size:15px;min-height:22px;margin-bottom:8px}
+#stat.pulse{animation:p 1.2s infinite}
+@keyframes p{50%{opacity:.45}}
+#go{width:100%;padding:18px;border:0;border-radius:16px;background:#2a9d4a;color:#fff;font-size:20px;font-weight:600}
+#go.on{background:#c0392b}
+.small{display:flex;gap:8px;margin-top:8px}
+.small button{flex:1;padding:10px;border:0;border-radius:10px;background:#e6e3da;font-size:14px}
+#msg{color:#b00;font-size:12px;text-align:center;min-height:16px;margin-top:4px}
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>Авто-переводчик · Русский ⇄ ខ្មែរ</h1>
+  <div class="opts">
+    <label>Слушаю:
+      <select id="mode"><option value="auto">авто (оба языка)</option><option value="ru">только русский</option><option value="km">только кхмерский</option></select></label>
+    <label><input type="checkbox" id="enVoice"> голос English</label>
+    <label>Скорость
+      <select id="rate"><option value="0.7">медл.</option><option value="0.85" selected>обычн.</option><option value="1">быстр.</option></select></label>
+  </div>
+</div>
+
+<div id="log"><div class="empty">Нажмите зелёную кнопку один раз. Дальше просто говорите по-русски или по-кхмерски: перевод и озвучка включатся сами.</div></div>
+
+<div class="bottom">
+  <div id="stat">Выключено</div>
+  <button id="go">▶ Старт</button>
+  <div class="small"><button id="clr">Очистить</button><button id="repeat">🔁 Повторить озвучку</button></div>
+  <div id="msg"></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const NAME={ru:'русский',km:'кхмерский',en:'English'};
+const TTS={ru:'ru-RU',km:'km-KH',en:'en-US'};
+const ASR={ru:'ru-RU',km:'km-KH'};
+let running=false,busy=false,listenLang='ru',rec=null,speakTok=0,curAudio=null,voices=[],last=null,wake=null,failStreak=0;
+
+/* ---------- translate ---------- */
+async function gtx(q,from,to){
+  const r=await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl='+from+'&tl='+to+'&dt=t&q='+encodeURIComponent(q));
+  if(!r.ok)throw 0;const j=await r.json();return j[0].map(x=>x[0]).join('')}
+async function mm(q,from,to){
+  const r=await fetch('https://api.mymemory.translated.net/get?q='+encodeURIComponent(q)+'&langpair='+from+'|'+to);
+  const j=await r.json();if(!j.responseData||!j.responseData.translatedText)throw 0;return j.responseData.translatedText}
+async function tr(q,f,t){try{return await gtx(q,f,t)}catch(e){return await mm(q,f,t)}}
+
+/* ---------- voice out ---------- */
+function loadVoices(){voices=(speechSynthesis.getVoices()||[]).map(v=>({v,lang:(v.lang||'').replace('_','-').toLowerCase()}))}
+try{loadVoices();speechSynthesis.onvoiceschanged=loadVoices}catch(e){}
+function findVoice(l){const w=TTS[l].toLowerCase();return (voices.find(x=>x.lang===w)||voices.find(x=>x.lang.startsWith(w.slice(0,2))))?.v||null}
+function chunks(t,max=170){const out=[];(t.match(/[^.!?។៕\n]+[.!?។៕]*/g)||[t]).forEach(s=>{s=s.trim();while(s.length>max){let k=s.lastIndexOf(' ',max);if(k<40)k=max;out.push(s.slice(0,k));s=s.slice(k).trim()}if(s)out.push(s)});return out}
+function say(text,l,tok){
+  return new Promise(res=>{
+    if(tok!==speakTok||!text.trim())return res();
+    const rate=parseFloat($('rate').value),v=findVoice(l),parts=chunks(text);let i=0;
+    if(v){
+      const next=()=>{if(tok!==speakTok||i>=parts.length)return res();
+        const u=new SpeechSynthesisUtterance(parts[i++]);u.voice=v;u.lang=v.lang;u.rate=rate;u.onend=next;u.onerror=next;speechSynthesis.speak(u)};
+      next();
+    }else{
+      const next=()=>{if(tok!==speakTok||i>=parts.length)return res();
+        const a=new Audio('https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl='+l+'&q='+encodeURIComponent(parts[i++]));
+        curAudio=a;a.playbackRate=rate>=1?1:Math.max(0.75,rate+0.1);
+        a.onended=next;a.onerror=()=>{$('msg').textContent='Не удалось озвучить ('+NAME[l]+'). Нужен интернет.';next()};
+        a.play().catch(()=>{$('msg').textContent='Телефон не дал включить звук. Нажмите «Повторить озвучку».';res()})};
+      next();
+    }})}
+function stopSpeak(){speakTok++;try{speechSynthesis.cancel()}catch(e){}if(curAudio){try{curAudio.pause()}catch(e){}curAudio=null}}
+async function speakItem(it){
+  stopSpeak();const tok=speakTok;
+  if($('enVoice').checked&&it.en)await say(it.en,'en',tok);
+  await say(it.dst,it.to,tok)}
+$('repeat').onclick=async()=>{if(!last)return;const was=running;if(rec){try{rec.abort()}catch(e){}}busy=true;await speakItem(last);busy=false;if(was&&running)listen()};
+
+/* ---------- log ---------- */
+function addBubble(it){
+  const log=$('log');const e=log.querySelector('.empty');if(e)e.remove();
+  const d=document.createElement('div');d.className='b '+it.from;
+  d.innerHTML='<div class="lab"></div><div class="src"></div><div class="en"></div><div class="dst"></div>';
+  d.querySelector('.lab').textContent=NAME[it.from]+' → '+NAME[it.to];
+  d.querySelector('.src').textContent=it.src;
+  d.querySelector('.en').textContent='EN: '+it.en;
+  d.querySelector('.dst').textContent=it.dst;
+  d.onclick=()=>{last=it;speakItem(it)};
+  log.appendChild(d);log.scrollTop=log.scrollHeight}
+$('clr').onclick=()=>{$('log').innerHTML='<div class="empty">Пусто.</div>';last=null};
+
+/* ---------- listen ---------- */
+const hasKm=s=>/[ក-៿]/.test(s), hasCy=s=>/[Ѐ-ӿ]/.test(s);
+function setStat(t,p){const s=$('stat');s.textContent=t;s.classList.toggle('pulse',!!p)}
+function other(l){return l==='ru'?'km':'ru'}
+function nextLang(afterSpeech,wasLang){
+  const m=$('mode').value;if(m!=='auto')return m;
+  return other(wasLang)}
+
+function listen(){
+  if(!running||busy)return;
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){$('msg').textContent='Нужен Chrome: здесь нет распознавания речи.';stop();return}
+  const m=$('mode').value;if(m!=='auto')listenLang=m;
+  const lang=listenLang;
+  rec=new SR();rec.lang=ASR[lang];rec.interimResults=false;rec.continuous=false;rec.maxAlternatives=1;
+  let got=false;
+  setStat('🎤 Слушаю: '+NAME[lang],true);
+  rec.onresult=async e=>{
+    got=true;
+    const r=e.results[0][0],text=(r.transcript||'').trim(),conf=r.confidence;
+    const okScript=lang==='km'?hasKm(text):hasCy(text);
+    if(!text||!okScript||(conf&&conf<0.45)){
+      $('msg').textContent='Не расслышал ('+NAME[lang]+'), повторите…';
+      listenLang=nextLang(false,lang);return}
+    $('msg').textContent='';failStreak=0;
+    busy=true;setStat('Перевожу…',false);
+    const to=other(lang);
+    try{
+      const [en,dst]=await Promise.all([tr(text,lang,'en'),tr(text,lang,to)]);
+      const it={from:lang,to,src:text,en,dst};last=it;addBubble(it);
+      setStat('🔊 Озвучиваю: '+NAME[to],true);
+      await speakItem(it);
+    }catch(err){$('msg').textContent='Нет связи с переводчиком. Проверьте интернет.'}
+    busy=false;listenLang=nextLang(true,lang);
+    setTimeout(listen,250)};
+  rec.onerror=e=>{
+    if(e.error==='not-allowed'||e.error==='service-not-allowed'){$('msg').textContent='Разрешите микрофон для сайта (значок 🔒 в адресной строке).';stop();return}
+    if(e.error==='language-not-supported'){$('msg').textContent='Этот язык распознавания (' +NAME[lang]+') не поддерживается на телефоне.';if($('mode').value==='auto')listenLang=other(lang)}
+  };
+  rec.onend=()=>{
+    if(!running||busy)return;
+    if(!got){listenLang=nextLang(false,lang);if(++failStreak>40){$('msg').textContent='Долго тихо, остановил. Нажмите Старт.';stop();return}}
+    setTimeout(listen,got?250:150)};
+  try{rec.start()}catch(e){setTimeout(listen,400)}
+}
+
+async function start(){
+  running=true;busy=false;failStreak=0;listenLang=$('mode').value==='km'?'km':'ru';
+  $('go').textContent='■ Стоп';$('go').classList.add('on');$('msg').textContent='';
+  try{wake=await navigator.wakeLock.request('screen')}catch(e){}
+  try{const u=new SpeechSynthesisUtterance(' ');speechSynthesis.speak(u)}catch(e){}
+  listen()}
+function stop(){
+  running=false;busy=false;stopSpeak();try{rec&&rec.abort()}catch(e){}
+  try{wake&&wake.release()}catch(e){}
+  $('go').textContent='▶ Старт';$('go').classList.remove('on');setStat('Выключено',false)}
+$('go').onclick=()=>running?stop():start();
+</script>
+</body>
+</html>
